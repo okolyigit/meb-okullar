@@ -1,177 +1,167 @@
-from bs4 import BeautifulSoup
-import urllib3
+"""
+MEB Okul Listesi
+================
+
+MEB "Okullar ve Diğer Kurumlar" sayfasının okul verisini çeken kod. Veri,
+sayfanın kullandığı DataTables endpoint'inden alınır:
+
+    POST https://www.meb.gov.tr/baglantilar/okullar/okullar_ajax.php
+    gövde: DataTables parametreleri + il=<plaka_kodu> + ilce=<ilce_kodu veya 0>
+    yanıt: { recordsTotal, data: [ {OKUL_ADI, HOST, YOL}, ... ] }
+
+OKUL_ADI biçimi: "İL - İLÇE - Okul Adı".
+
+Kullanım:
+    from meb import Meb
+    m = Meb()
+    sanliurfa = m.il(63)
+    okullar = sanliurfa.okullar()
+    m.tocsv('sanliurfa.csv', [sanliurfa])
+"""
+
+import csv
+import json
 import logging
 import re
-import csv
+import time
+from urllib.parse import urlencode
+
+import urllib3
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger.setLevel(logging.INFO)
+_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_ch = logging.StreamHandler()
+_ch.setFormatter(_formatter)
+logger.addHandler(_ch)
 
-error_handler = logging.FileHandler(filename='meb_error.log')
-error_handler.setLevel(logging.WARNING)
-error_handler.setFormatter(formatter)
-logger.addHandler(error_handler)
+http = urllib3.PoolManager()
 
-debug_handler = logging.FileHandler(filename='meb_debug.log', mode='w')
-debug_handler.setLevel(logging.DEBUG)
-debug_handler.setFormatter(formatter)
-logger.addHandler(debug_handler)
+ENDPOINT = 'https://www.meb.gov.tr/baglantilar/okullar/okullar_ajax.php'
 
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-ch.setFormatter(formatter)
-logger.addHandler(ch)
+# Plaka kodu -> İl adı (endpoint "il" parametresi plaka kodunu bekler)
+IL_KODLARI = {
+    '1': 'Adana', '2': 'Adıyaman', '3': 'Afyonkarahisar', '4': 'Ağrı',
+    '5': 'Amasya', '6': 'Ankara', '7': 'Antalya', '8': 'Artvin',
+    '9': 'Aydın', '10': 'Balıkesir', '11': 'Bilecik', '12': 'Bingöl',
+    '13': 'Bitlis', '14': 'Bolu', '15': 'Burdur', '16': 'Bursa',
+    '17': 'Çanakkale', '18': 'Çankırı', '19': 'Çorum', '20': 'Denizli',
+    '21': 'Diyarbakır', '22': 'Edirne', '23': 'Elazığ', '24': 'Erzincan',
+    '25': 'Erzurum', '26': 'Eskişehir', '27': 'Gaziantep', '28': 'Giresun',
+    '29': 'Gümüşhane', '30': 'Hakkari', '31': 'Hatay', '32': 'Isparta',
+    '33': 'Mersin', '34': 'İstanbul', '35': 'İzmir', '36': 'Kars',
+    '37': 'Kastamonu', '38': 'Kayseri', '39': 'Kırklareli', '40': 'Kırşehir',
+    '41': 'Kocaeli', '42': 'Konya', '43': 'Kütahya', '44': 'Malatya',
+    '45': 'Manisa', '46': 'Kahramanmaraş', '47': 'Mardin', '48': 'Muğla',
+    '49': 'Muş', '50': 'Nevşehir', '51': 'Niğde', '52': 'Ordu',
+    '53': 'Rize', '54': 'Sakarya', '55': 'Samsun', '56': 'Siirt',
+    '57': 'Sinop', '58': 'Sivas', '59': 'Tekirdağ', '60': 'Tokat',
+    '61': 'Trabzon', '62': 'Tunceli', '63': 'Şanlıurfa', '64': 'Uşak',
+    '65': 'Van', '66': 'Yozgat', '67': 'Zonguldak', '68': 'Aksaray',
+    '69': 'Bayburt', '70': 'Karaman', '71': 'Kırıkkale', '72': 'Batman',
+    '73': 'Şırnak', '74': 'Bartın', '75': 'Ardahan', '76': 'Iğdır',
+    '77': 'Yalova', '78': 'Karabük', '79': 'Kilis', '80': 'Osmaniye',
+    '81': 'Düzce',
+}
 
-http = urllib3.PoolManager(num_pools=1)
+_HEADERS = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'X-Requested-With': 'XMLHttpRequest',
+    'User-Agent': 'Mozilla/5.0',
+    'Referer': 'https://www.meb.gov.tr/baglantilar/okullar/index.php',
+}
+
 
 def capitalize(string):
-    all = []
+    """Türkçe-duyarlı başlık biçimi (büyük I -> ı)."""
+    words = []
     for s in str(string).split(' '):
+        if not s:
+            continue
         cap = list(s.capitalize())
         for i, c in enumerate(s):
             if i == 0:
                 continue
             if c == "I":
                 cap[i] = "ı"
-        all.append("".join(cap))
+        words.append("".join(cap))
+    return " ".join(words)
 
-    return " ".join(all)
 
-class Ilce:
+def _strip_tags(value):
+    if value is None:
+        return None
+    return re.sub(r'<[^>]+>', '', str(value)).strip() or None
 
-    def __repr__(self):
-        return str("<Ilce: %s - %s>" % (self.iladi, self.ad))
-
-    def __init__(self, ad, kod, url, iladi):
-        self.iladi = iladi
-        self.ad = capitalize(ad)
-        self.kod = kod
-        self.url = url + "&ILCEKODU=" + str(kod)
-
-    def okullar(self):
-        okullar = []
-        for p in self.sayfalar():
-            for o in p.get():
-                okullar.append(o)
-        return okullar
-
-    def sayfalar(self):
-        logger.info('%s - %s ilçesi indiriliyor.' % (self.iladi, self.ad))
-        try:
-            respone = http.urlopen('GET', self.url)
-            data = BeautifulSoup(respone.data, 'html.parser')
-        except Exception:
-            logger.exception('%s - %s ilçesi sayfası indirilemedi!' % (self.iladi, self.ad))
-            raise
-
-        logger.debug('Sayfalar oluşturuluyor.')
-
-        pages = []
-
-        try:
-            lastpage = int(data.find('a', {'class': 'last'}).attrs.get('href').split('=')[-1])
-            logger.debug('Toplam alt sayfa sayısı: %s' % lastpage)
-
-            for i in range(lastpage):
-                pages.append(Sayfa(i + 1, self.url))
-        except Exception:
-            logger.exception('%s - %s ilçesi alt sayfaları oluşturulamadı!' % (self.iladi, self.ad))
-            raise
-
-        return pages
-
-class Il:
-
-    def __str__(self):
-        return str(self.ad)
-
-    def __repr__(self):
-        return str("<Il: %s>" % self.ad)
-
-    def __init__(self, ad, kod, base_url):
-        self.ad = capitalize(ad)
-        self.kod = kod
-        self.url = base_url + "?ILKODU=" + str(kod)
-
-    def ilceler(self):
-
-        logger.info('%s ili indiriliyor.' % self.ad)
-        try:
-            respone = http.urlopen('GET', self.url)
-            data = BeautifulSoup(respone.data, 'html.parser')
-        except Exception:
-            logger.exception('%s sayfası indirilemedi!' % self.ad)
-            raise
-
-        logger.info('%s ilçeleri ayrıştırılıyor.' % self.ad)
-        ilceler = []
-        try:
-            select = data.find('select', {'id': 'jumpMenu6'})
-            options = select.find_all('option')
-            options.pop(0)
-            for opt in options:
-                ilceler.append(
-                    Ilce(opt.contents[0], opt.attrs.get('value').split('=')[-1], self.url, self.ad)
-                )
-        except Exception:
-            logger.exception('%s ilçeleri ayrışıtırılamadı!' % self.ad)
-            raise
-
-        return ilceler
-
-    def okullar(self):
-        """
-        İl'e ait okulları döner
-        :return:
-        """
-        logger.info("%s ili okulları alınıyor..." % self.ad)
-        schools = []
-        for ilce in self.ilceler():
-            for o in ilce.okullar():
-                schools.append(o)
-        return schools
 
 class Okul:
     def __repr__(self):
-        return str("<Okul: %s>" % self.ad)
+        return "<Okul: %s>" % self.ad
 
-    def __init__(self, data):
-        try:
-            a = data.find_all('a')[0]
-            website = a.attrs.get('href')
-            self.website = website if website != "#" else None
-            self.il = capitalize(a.contents[0].split(' - ')[0])
-            self.ilce = capitalize(a.contents[0].split(' - ')[1])
-            self.ad = capitalize(" ".join(a.contents[0].split(' - ')[2:]))
-            self.type = self._type(self.ad)
-        except Exception:
-            logger.exception('Okul datası hatalı!\nDATA: %s' % data)
-            raise
+    def __init__(self, record):
+        """okullar_ajax.php yanıtındaki bir kayıttan Okul oluşturur.
 
+        Alanlar: OKUL_ADI ("İL - İLÇE - Okul Adı"), HOST, YOL.
+        HOST okulun web alan adı (ya da kurum kodu); YOL ile tam adres kurulur.
+        """
+        self.raw = record
+        self.il, self.ilce, self.ad = self._parse_ad(_strip_tags(record.get('OKUL_ADI')) or '')
+        self.host = _strip_tags(record.get('HOST'))
+        self.yol = _strip_tags(record.get('YOL'))
+        self.website = self._build_url(self.host)
+        self.type = self._type(self.ad)
+
+    @staticmethod
+    def _build_url(host):
+        host = (host or '').strip()
+        if not host or host in ('#', '-'):
+            return None
+        if host.startswith('http://') or host.startswith('https://'):
+            return host
+        # HOST nokta içeriyorsa tam alan adıdır; yoksa MEB k12 alt alan adı kuralı.
+        if '.' in host:
+            return 'https://' + host.lstrip('/')
+        return 'https://%s.meb.k12.tr' % host
+
+    @staticmethod
+    def _parse_ad(kurum_adi):
+        """OKUL_ADI -> (il, ilce, ad). Biçim: "İL - İLÇE - Okul Adı".
+
+        Okul adının kendisinde de " - " geçebileceği için yalnızca ilk iki
+        ayraç il/ilçe olarak alınır, kalanı okul adıdır.
+        """
+        ad = re.sub(r'\s+', ' ', kurum_adi.strip())
+        parts = ad.split(' - ')
+        if len(parts) >= 3:
+            il, ilce = parts[0], parts[1]
+            okul = ' - '.join(parts[2:])
+        elif len(parts) == 2:
+            il, ilce, okul = parts[0], '', parts[1]
+        else:
+            il, ilce, okul = '', '', ad
+        return capitalize(il.strip()), capitalize(ilce.strip()), okul.strip()
+
+    def as_dict(self):
+        return {
+            'il_adi': self.il,
+            'ilce_adi': self.ilce,
+            'okul_adi': self.ad,
+            'tip': self.type,
+            'okul_website': self.website,
+            'host': self.host,
+            'yol': self.yol,
+        }
 
     def _type(self, ad):
-        MESLEK_LISESI = "Mesleki Eğitim Merkezi|" \
-                        "MESLEKİ EĞİTİM MERKEZİ|" \
-                        "Teknik Eğitim Merkezi|" \
-                        "MESLEKİ EĞİTİM MERKEZ|" \
-                        "Mesleki Eğitimi Merkezi|" \
-                        "Turizm Eğitim Merkezi|" \
-                        "TURİZM EĞİTİM MERKEZİ|" \
-                        "EğitimUygulama|" \
-                        "TEKNİK EĞİTİM MERKEZİ|" \
-                        "Tekin Mes|" \
-                        "Eğitim  Merkezi|" \
-                        "Mes\.Eğt|" \
-                        "Eğitim Enstitüsü|"
+        MESLEK_LISESI = "Mesleki Eğitim Merkezi|MESLEKİ EĞİTİM MERKEZİ|" \
+                        "Teknik Eğitim Merkezi|MESLEKİ EĞİTİM MERKEZ|" \
+                        "Mesleki Eğitimi Merkezi|Turizm Eğitim Merkezi|" \
+                        "TURİZM EĞİTİM MERKEZİ|EğitimUygulama|" \
+                        "TEKNİK EĞİTİM MERKEZİ|Tekin Mes|Eğitim  Merkezi|" \
+                        "Mes\\.Eğt|Eğitim Enstitüsü|"
 
-        OGRETMENEVI = "ÖĞRETMENEVİ MÜDÜRLÜĞÜ|" \
-                      "ÖĞRETMENEVİ|" \
-                      "Öğretmenevi|" \
-                      "Öğretmen Evi|" \
-                      "ÖĞRETMEN EVİ|" \
-                      "Ögretmen Evi|" \
-                      "Öğretmeni"
+        OGRETMENEVI = "ÖĞRETMENEVİ MÜDÜRLÜĞÜ|ÖĞRETMENEVİ|Öğretmenevi|" \
+                      "Öğretmen Evi|ÖĞRETMEN EVİ|Ögretmen Evi|Öğretmeni"
 
         if re.findall("Ortaokul|ORTAOKUL|Orta Okul|ortaokul|ORTOKULU|Ortaoku|Ortakulu|ORTA OKULU|Ortaoklu|ORTAOOKULU|Ortaoklulu|Ortokulu", ad):
             return "Ortaokul"
@@ -200,90 +190,110 @@ class Okul:
         elif re.findall("YBO", ad):
             return "Yatılı Bölge Okulu"
         else:
-            logger.warning('"%s" için Okul Tipi anlaşılamadı!' % self.ad)
             return None
 
 
-class Sayfa:
+class Il:
+    def __str__(self):
+        return str(self.ad)
+
     def __repr__(self):
-        return str("<Sayfa: %s>" % self.no)
+        return "<Il: %s (%s)>" % (self.ad, self.kod)
 
-    def __init__(self, no, base_url):
-        self.url = base_url + "&SAYFANO=" + str(no)
-        self.no = no
-        self._contents = []
+    def __init__(self, kod, ad=None):
+        self.kod = str(kod)
+        self.ad = ad or IL_KODLARI.get(self.kod, self.kod)
 
-    def get(self):
-        logger.info('Sayfa indiriliyor: %s' % self.url)
-        respone = http.urlopen('GET', self.url)
-        data = BeautifulSoup(respone.data, 'html.parser')
+    def _page(self, ilce, start, length, draw):
+        params = {
+            'draw': draw, 'start': start, 'length': length,
+            'il': self.kod, 'ilce': ilce,
+            'search[value]': '', 'search[regex]': 'false',
+            'order[0][column]': 0, 'order[0][dir]': 'asc',
+        }
+        for i in range(3):  # tabloda 3 kolon var, hepsi OKUL_ADI'na bağlı
+            params['columns[%d][data]' % i] = 'OKUL_ADI'
+            params['columns[%d][name]' % i] = ''
+            params['columns[%d][searchable]' % i] = 'true'
+            params['columns[%d][orderable]' % i] = 'true' if i == 0 else 'false'
+            params['columns[%d][search][value]' % i] = ''
+            params['columns[%d][search][regex]' % i] = 'false'
+        body = urlencode(params)
+        # Endpoint kararsız: çoğu zaman 200 + boş gövde ya da 500 döner; tekrar dene.
+        last = None
+        for attempt in range(10):
+            try:
+                resp = http.request('POST', ENDPOINT, body=body,
+                                    headers=_HEADERS, timeout=30.0)
+                if resp.status == 200 and resp.data:
+                    return json.loads(resp.data.decode('utf-8'))
+                last = 'HTTP %s, %d bayt' % (resp.status, len(resp.data))
+            except Exception as e:
+                last = str(e)
+            time.sleep(2)
+        raise RuntimeError('%s yanıt vermedi (%s)' % (ENDPOINT, last))
 
-        schools = []
-
+    def okullar(self, ilce_kodu=0, page_size=1000):
+        """
+        İlin (isteğe bağlı: tek bir ilçenin) okullarını döner.
+        :param ilce_kodu: 0/boş -> ildeki tüm okullar; dolu -> sadece o ilçe
+        :return: [Okul, ...]
+        """
+        logger.info('%s (%s) okulları indiriliyor...' % (self.ad, self.kod))
+        okullar = []
+        start, draw = 0, 1
+        total = None
         try:
-            div = data.find('div', {'id': 'grid'})
-            table = div.find('table')
-            contents = table.find_all('tr')
-            contents.pop(0)  # table'ın ilk satırını çıkar
-            for cont in contents:
-                okul = Okul(cont)
-                logger.debug('Okul: %s oluşturuldu' % okul.ad)
-                schools.append(okul)
+            while True:
+                d = self._page(ilce_kodu, start, page_size, draw)
+                rows = d.get('data', []) if isinstance(d, dict) else d
+                if total is None and isinstance(d, dict):
+                    total = d.get('recordsTotal') or d.get('recordsFiltered')
+                okullar.extend(Okul(r) for r in rows)
+                draw += 1
+                if not rows or (total is not None and len(okullar) >= int(total)):
+                    break
+                if len(rows) < page_size:  # son sayfa
+                    break
+                start += page_size
         except Exception:
-            logger.exception('Sayfa %s için okullar ayrıştırılamadı.' % self.url)
-        return schools
+            logger.exception('%s okulları indirilemedi!' % self.ad)
+            raise
+        logger.info('%s: %d okul bulundu.' % (self.ad, len(okullar)))
+        return okullar
+
 
 class Meb:
     def __init__(self):
-        self.meb_url = 'http://www.meb.gov.tr/baglantilar/okullar/'
-        self.iller = []
-        self._buil_iller()
+        self.iller = [Il(k, v) for k, v in sorted(IL_KODLARI.items(), key=lambda kv: int(kv[0]))]
 
-    def _buil_iller(self):
-        try:
-            logger.debug('İller alınıyor...')
-            respone = http.urlopen('GET', self.meb_url)
-            soup = BeautifulSoup(respone.data, 'html.parser')
-            select = soup.find('select', {'id': 'jumpMenu5'})
-            options = select.find_all('option')
-            options.pop(0)  # ilk değeri çıkar
-            options.pop(81)  # BAKANLIK seçeneğini çıkar
-
-            for opt in options:
-                il = Il(opt.contents[0], opt.attrs.get('value').split('=')[1], self.meb_url)
-                logger.debug("Il: %s oluşturuldu." % il.ad)
-                self.iller.append(il)
-        except Exception:
-            logger.exception('Iller oluşuturulamadı!')
-            raise
+    def il(self, kod):
+        """Plaka koduna göre Il döner. Örn: m.il(63) -> Şanlıurfa"""
+        kod = str(kod)
+        for il in self.iller:
+            if il.kod == kod:
+                return il
+        return Il(kod)
 
     def okullar(self):
+        """Türkiye genelindeki tüm okulları döner (uzun sürer)."""
         schools = []
         for il in self.iller:
-            for o in il.okullar():
-                schools.append(o)
+            schools.extend(il.okullar())
         return schools
 
-    def tocsv(self, filename):
-        with open(filename, 'w') as csvfile:
-            fieldnames = ['il_adi', 'il_kodu', 'ilce_adi', 'ilce_kodu', 'okul_adi', 'okul_website', 'tip']
+    def tocsv(self, filename, iller=None):
+        """Verilen illerin (varsayılan: tümü) okullarını CSV'ye yazar."""
+        iller = iller if iller is not None else self.iller
+        fieldnames = ['il_adi', 'ilce_adi', 'okul_adi', 'tip',
+                      'okul_website', 'host', 'yol']
+        counter = 0
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-            counter = 0
-            for il in self.iller:
-                for ilce in il.ilceler():
-                    for sayfa in ilce.sayfalar():
-                        for okul in sayfa.get():
-                            logger.info("Okul yazılıyor: %i - %s" % (counter, okul.ad))
-                            writer.writerow({
-                                'ulke_adi': 'Türkiye',
-                                'il_adi': il.ad,
-                                'il_kodu': il.kod,
-                                'ilce_adi': ilce.ad,
-                                'ilce_kodu': ilce.kod,
-                                'okul_adi': okul.ad,
-                                'okul_website': okul.website,
-                                'tip': okul.type
-                            })
-                            counter += 1
-            logger.info("Toplam Yazılan Okul Sayısı: %s" % counter)
+            for il in iller:
+                for okul in il.okullar():
+                    writer.writerow(okul.as_dict())
+                    counter += 1
+        logger.info("Toplam yazılan okul sayısı: %s" % counter)
+        return counter

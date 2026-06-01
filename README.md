@@ -1,92 +1,89 @@
 # Meb Okulları Listesi
 
-[Milli Eğitim Bakanlığı](http://www.meb.gov.tr/baglantilar/okullar/) 
-web sitesindeki 81 ilin okullarının listesini çeken python kodu.
+[Milli Eğitim Bakanlığı](https://www.meb.gov.tr/baglantilar/okullar/)
+web sitesindeki illerin okul listesini çeken python kodu.
 
-*Not: Web sitesinde yer alan Bakanlık seçeneği altındaki yurt dışı okulları dahil değil.*
+Veri, sayfanın kullandığı DataTables endpoint'inden alınır:
 
-## Okullar CSV
+```text
+POST https://www.meb.gov.tr/baglantilar/okullar/okullar_ajax.php
+gövde: DataTables parametreleri + il=<plaka_kodu> + ilce=<ilce_kodu veya 0>
+yanıt: { recordsTotal, data: [ { "OKUL_ADI", "HOST", "YOL" }, ... ] }
+```
 
-Okulların indirilmiş ve kategorize edilmiş güncel halini **meb-okullar.csv** dosyasında bulabilirsiniz.
-
-*Son Güncelleme: 24 Mart 2017*
+- `il` parametresi **plaka kodu**dur (örn. Şanlıurfa = 63).
+- `OKUL_ADI` biçimi: `"İL - İLÇE - Okul Adı"`; `HOST` + `YOL` ile okulun web adresi kurulur.
+- Endpoint zaman zaman boş gövde ya da `HTTP 500` döndürebildiği için her sayfa
+  birkaç kez yeniden denenir; veri gelene kadar bir-iki saniye sürebilir.
 
 ## Gereksinimler
 
-* Python 3.5 =>
-* beautifulsoup4
-* urllib3
+- Python 3.6 =>
+- urllib3
 
-``pip install -r requirements``
+```
+pip install -r requirements.txt
+```
 
 ## Kullanım
 
-```
+```python
 from meb import Meb
 
-m = Meb() # Meb'in web sitesinden illerin listesini indirir.
-m.iller # illerin listesi
-[<Il: Adana>, <Il: Adıyaman>, ...]
-
-m.okullar()  # Tum okullari indirir.
-# Internet hızınıza bagli olarak bu islem vakit alir.
-[<Okul: Okul Adı>, ...]
-
-m.tocsv('/path/to/okullar.csv')  # Okulları verilen dosyaya yazar
-# NOT: .tocsv() methodu butun okulları tekrar indirmeye baslayacagi icin
-# m.okullar() komutunu kullanmadan sadece bunu kullanin.
+m = Meb()
+m.iller                 # 81 il (plaka kodu ile)
+# [<Il: Adana (1)>, ..., <Il: Şanlıurfa (63)>, ...]
 ```
 
-### Belirli Bir İl veya İlçenin Okulları
-```
-# Tek Bir İlin Okullarını İndirme #
+### Tek Bir İlin Okulları (örn. Şanlıurfa = 63)
 
-adana = m.iller[0]
-adana.__dict__
-# {'url': 'http://www.meb.gov.tr/baglantilar/okullar/?ILKODU=1', 'kod': '1', 'ad': 'Adana'}
+```python
+sanliurfa = m.il(63)               # ya da m.il('63')
+okullar = sanliurfa.okullar()      # Şanlıurfa'daki tüm okullar
 
-adana_okullari = adana.okullar()  # Adana ili okullarını indirir.
-[<Okul: Büyüksofulu Ortaokulu>, ...]
-
-okul = adana_okullari[0]
+okul = okullar[0]
 okul.__dict__
-# {'type': 'Ortaokul', 'il': 'Adana', 'ilce': 'Aladağ', 'website': 'http://sofulu.meb.k12.tr', 'ad': 'Büyüksofulu Ortaokulu'}
+# {'il': 'Şanlıurfa', 'ilce': 'Akçakale',
+#  'ad': 'Abdulkadir Yüceltaş Anaokulu',
+#  'host': '...', 'yol': '...',
+#  'website': 'https://...meb.k12.tr',
+#  'type': 'Anaokulu', 'raw': {...}}
 
+# CSV'ye yazma
+m.tocsv('sanliurfa_okullar.csv', [sanliurfa])
 ```
 
+CSV kolonları: `il_adi, ilce_adi, okul_adi, tip, okul_website, host, yol`
+
+### Tek Bir İlçenin Okulları
+
+```python
+# ilce_kodu, MEB il sayfasındaki ilçe (ILCEKODU) değeridir.
+akcakale = m.il(63).okullar(ilce_kodu='575')
 ```
-# Tek Bir İlçenin Okullarını İndirme #
 
-adana_ilceleri = adana.ilceler() # Adana ili ilcelerini indirir
-# Merkez'e bağlı okullar ilçler altında Büyükşehir veya Merkez olarak geliyor.
-[<Ilce: Adana - Aladağ>, <Ilce: Adana - Bahçe>, ...]
+### Tüm Türkiye
 
-aladag = adana_ilceleri[0]
-aladag.__dict__
-# {'url': 'http://www.meb.gov.tr/baglantilar/okullar/?ILKODU=1&ILCEKODU=2', 'kod': '2', 'ad': 'Aladağ', 'iladi': 'Adana'}
-
-
-aladag_okullari = aladag.okullar()  # Okulları indirir.
-[<Okul: Büyüksofulu Ortaokulu>, ...]
-
-okul = aladag_okullari[0]
-okul.__dict__
-# {'type': 'Ortaokul', 'il': 'Adana', 'ilce': 'Aladağ', 'website': 'http://sofulu.meb.k12.tr', 'ad': 'Büyüksofulu Ortaokulu'}
+```python
+m.okullar()                 # tüm illerin okulları (uzun sürer)
+m.tocsv('meb-okullar.csv')  # hepsini CSV'ye yazar
 ```
 
 ## Okul Tipleri
 
-* None (Belirlenemeyen)
-* Anaokulu
-* İlkokul
-* Ortaokul
-* Lise
-* Sanat Okulu
-* Halk Eğitim Merkezi
-* Araştırma Merkezi
-* Milli Eğitim Müdürlüğü
-* Meslek Lisesi
-* Uygulama Merkezi
-* Olgunlaşma Enstitüsü
-* Öğretmenevi
-* Yatılı Bölge Okulu
+`Okul.type` alanı okul adından çıkarılır:
+
+- None (Belirlenemeyen)
+- Anaokulu
+- İlkokul
+- Ortaokul
+- Lise
+- Sanat Okulu
+- Halk Eğitim Merkezi
+- Araştırma Merkezi
+- Milli Eğitim Müdürlüğü
+- Meslek Lisesi
+- Uygulama Merkezi
+- Olgunlaşma Enstitüsü
+- Öğretmenevi
+- Yatılı Bölge Okulu
