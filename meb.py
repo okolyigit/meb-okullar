@@ -72,19 +72,27 @@ _HEADERS = {
 }
 
 
+_TR_UPPER = {'I': 'ı', 'İ': 'i', 'Ş': 'ş', 'Ç': 'ç', 'Ö': 'ö', 'Ü': 'ü', 'Ğ': 'ğ'}
+_TR_LOWER = {'i': 'İ', 'ı': 'I', 'ş': 'Ş', 'ç': 'Ç', 'ö': 'Ö', 'ü': 'Ü', 'ğ': 'Ğ'}
+
+
+def _tr_lower(ch):
+    return _TR_UPPER.get(ch, ch.lower())
+
+
+def _tr_upper(ch):
+    return _TR_LOWER.get(ch, ch.upper())
+
+
 def capitalize(string):
-    """Türkçe-duyarlı başlık biçimi (büyük I -> ı)."""
+    """Türkçe-duyarlı başlık biçimi (I->ı, İ->i; birleşik nokta bırakmaz)."""
     words = []
     for s in str(string).split(' '):
         if not s:
             continue
-        cap = list(s.capitalize())
-        for i, c in enumerate(s):
-            if i == 0:
-                continue
-            if c == "I":
-                cap[i] = "ı"
-        words.append("".join(cap))
+        head = _tr_upper(s[0])
+        tail = ''.join(_tr_lower(c) for c in s[1:])
+        words.append(head + tail)
     return " ".join(words)
 
 
@@ -98,14 +106,19 @@ class Okul:
     def __repr__(self):
         return "<Okul: %s>" % self.ad
 
-    def __init__(self, record):
+    def __init__(self, record, il_adi=None):
         """okullar_ajax.php yanıtındaki bir kayıttan Okul oluşturur.
 
         Alanlar: OKUL_ADI ("İL - İLÇE - Okul Adı"), HOST, YOL.
         HOST okulun web alan adı (ya da kurum kodu); YOL ile tam adres kurulur.
+
+        il_adi verilirse (sorgulanan ilin resmi adı) il, metinden parse edilen
+        yazıma göre değil bu değere göre alınır; böylece kaynaktaki yazım
+        tutarsızlıkları ("Afyon"/"Afyonkarahisar" gibi) tek isimde birleşir.
         """
         self.raw = record
-        self.il, self.ilce, self.ad = self._parse_ad(_strip_tags(record.get('OKUL_ADI')) or '')
+        il, self.ilce, self.ad = self._parse_ad(_strip_tags(record.get('OKUL_ADI')) or '')
+        self.il = il_adi or il
         self.host = _strip_tags(record.get('HOST'))
         self.yol = _strip_tags(record.get('YOL'))
         self.website = self._build_url(self.host)
@@ -249,7 +262,7 @@ class Il:
                 rows = d.get('data', []) if isinstance(d, dict) else d
                 if total is None and isinstance(d, dict):
                     total = d.get('recordsTotal') or d.get('recordsFiltered')
-                okullar.extend(Okul(r) for r in rows)
+                okullar.extend(Okul(r, il_adi=self.ad) for r in rows)
                 draw += 1
                 if not rows or (total is not None and len(okullar) >= int(total)):
                     break

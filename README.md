@@ -3,6 +3,13 @@
 [Milli Eğitim Bakanlığı](https://www.meb.gov.tr/baglantilar/okullar/)
 web sitesindeki illerin okul listesini çeken python kodu.
 
+## Hazır Veri
+
+Kodu çalıştırmak istemeyenler için tüm Türkiye'nin güncel okul listesi
+[`meb-okullar.csv`](meb-okullar.csv) dosyasında hazır bulunur:
+**81 il, 54.940 okul**. Kolonlar: `il_adi, ilce_adi, okul_adi, tip,
+okul_website, host, yol`.
+
 Veri, sayfanın kullandığı DataTables endpoint'inden alınır:
 
 ```text
